@@ -1,0 +1,6 @@
+.venv/
+output/
+cache/
+.env
+*.log
+/shorts

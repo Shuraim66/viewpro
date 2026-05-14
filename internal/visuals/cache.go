@@ -28,17 +28,20 @@ type ClipSummary struct {
 	URL      string `json:"url"`
 }
 
-func searchKey(query string) string {
-	sum := sha256.Sum256([]byte(query + "|portrait|min4"))
+// searchKey hashes (query, variant). variant distinguishes search criteria
+// (e.g., "default" vs "opener-strict") so the opener fallback doesn't get
+// a non-strict cached clip from an earlier default search.
+func searchKey(query, variant string) string {
+	sum := sha256.Sum256([]byte(query + "|portrait|" + variant))
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-func cachePath(cacheDir, query string) string {
-	return filepath.Join(cacheDir, "search_"+searchKey(query)+".json")
+func cachePath(cacheDir, query, variant string) string {
+	return filepath.Join(cacheDir, "search_"+searchKey(query, variant)+".json")
 }
 
-func readCache(cacheDir, query string) (*cachedSearch, bool) {
-	path := cachePath(cacheDir, query)
+func readCache(cacheDir, query, variant string) (*cachedSearch, bool) {
+	path := cachePath(cacheDir, query, variant)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
@@ -59,7 +62,7 @@ func readCache(cacheDir, query string) (*cachedSearch, bool) {
 	return &c, true
 }
 
-func writeCache(cacheDir, query string, c *cachedSearch) error {
+func writeCache(cacheDir, query, variant string, c *cachedSearch) error {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return err
 	}
@@ -68,7 +71,7 @@ func writeCache(cacheDir, query string, c *cachedSearch) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cachePath(cacheDir, query), data, 0o644)
+	return os.WriteFile(cachePath(cacheDir, query, variant), data, 0o644)
 }
 
 func clipPath(cacheDir string, videoID int) string {

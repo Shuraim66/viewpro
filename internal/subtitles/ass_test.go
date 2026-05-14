@@ -48,20 +48,39 @@ func TestEscapeASS(t *testing.T) {
 	}
 }
 
-func TestRenderText_ActiveWordYellow(t *testing.T) {
+func TestRenderKaraokeText_ActiveWordYellow(t *testing.T) {
 	words := []voice.Word{
 		{Text: "one"}, {Text: "two"}, {Text: "three"}, {Text: "four"}, {Text: "five"},
 	}
-	got := renderText(words, 2, 2) // active = "three", window = 2
+	got := renderKaraokeText(words, 2, 2, "&H0000FFFF&") // active = "three", window = 2
 	want := "one two {\\c&H0000FFFF&}three{\\c&H00FFFFFF&} four five"
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
 }
 
-func TestRenderText_ClampedAtEdges(t *testing.T) {
+func TestRenderKaraokeText_GreenColor(t *testing.T) {
+	words := []voice.Word{{Text: "alpha"}, {Text: "bravo"}}
+	got := renderKaraokeText(words, 0, 1, "&H0000FF00&")
+	if !strings.Contains(got, "{\\c&H0000FF00&}alpha{\\c&H00FFFFFF&}") {
+		t.Errorf("expected green color tag, got %q", got)
+	}
+}
+
+func TestRenderKaraokeText_NoColor(t *testing.T) {
+	words := []voice.Word{{Text: "one"}, {Text: "two"}}
+	got := renderKaraokeText(words, 0, 1, "")
+	if strings.Contains(got, "\\c") {
+		t.Errorf("expected no color tag with activeColor=\"\", got %q", got)
+	}
+	if got != "one two" {
+		t.Errorf("expected 'one two', got %q", got)
+	}
+}
+
+func TestRenderKaraokeText_ClampedAtEdges(t *testing.T) {
 	words := []voice.Word{{Text: "first"}, {Text: "second"}}
-	got := renderText(words, 0, 2)
+	got := renderKaraokeText(words, 0, 2, "&H0000FFFF&")
 	if !strings.HasPrefix(got, "{\\c&H0000FFFF&}first") {
 		t.Errorf("expected active word at start, got %q", got)
 	}
@@ -70,31 +89,107 @@ func TestRenderText_ClampedAtEdges(t *testing.T) {
 	}
 }
 
-func TestRenderText_Window1(t *testing.T) {
+func TestRenderKaraokeText_Window1(t *testing.T) {
 	words := []voice.Word{
 		{Text: "one"}, {Text: "two"}, {Text: "three"}, {Text: "four"}, {Text: "five"},
 	}
-	t.Run("middle word: 1 before + active + 1 after = 3 words", func(t *testing.T) {
-		got := renderText(words, 2, 1)
+	t.Run("middle word", func(t *testing.T) {
+		got := renderKaraokeText(words, 2, 1, "&H0000FFFF&")
 		want := "two {\\c&H0000FFFF&}three{\\c&H00FFFFFF&} four"
 		if got != want {
 			t.Errorf("got %q\nwant %q", got, want)
 		}
 	})
-	t.Run("first word: 0 before + active + 1 after = 2 words", func(t *testing.T) {
-		got := renderText(words, 0, 1)
+	t.Run("first word: clamped to 2 words", func(t *testing.T) {
+		got := renderKaraokeText(words, 0, 1, "&H0000FFFF&")
 		want := "{\\c&H0000FFFF&}one{\\c&H00FFFFFF&} two"
 		if got != want {
 			t.Errorf("got %q\nwant %q", got, want)
 		}
 	})
-	t.Run("last word: 1 before + active + 0 after = 2 words", func(t *testing.T) {
-		got := renderText(words, 4, 1)
+	t.Run("last word: clamped to 2 words", func(t *testing.T) {
+		got := renderKaraokeText(words, 4, 1, "&H0000FFFF&")
 		want := "four {\\c&H0000FFFF&}five{\\c&H00FFFFFF&}"
 		if got != want {
 			t.Errorf("got %q\nwant %q", got, want)
 		}
 	})
+}
+
+func TestChunkWords(t *testing.T) {
+	t.Run("3-word chunks, no sentence breaks", func(t *testing.T) {
+		words := []voice.Word{
+			{Text: "a"}, {Text: "b"}, {Text: "c"}, {Text: "d"}, {Text: "e"}, {Text: "f"}, {Text: "g"},
+		}
+		chunks := chunkWords(words, 3)
+		if len(chunks) != 3 {
+			t.Fatalf("got %d chunks, want 3 (3+3+1): %v", len(chunks), chunks)
+		}
+		if len(chunks[0]) != 3 || len(chunks[1]) != 3 || len(chunks[2]) != 1 {
+			t.Errorf("chunk sizes wrong: %v", chunks)
+		}
+	})
+	t.Run("breaks early at sentence end", func(t *testing.T) {
+		words := []voice.Word{
+			{Text: "Stop"}, {Text: "doing"}, {Text: "this."}, {Text: "You"}, {Text: "should"},
+		}
+		chunks := chunkWords(words, 3)
+		// Chunk 1 ends at "this." (sentence end). Chunk 2 is "You should".
+		if len(chunks) != 2 {
+			t.Fatalf("got %d chunks, want 2: %v", len(chunks), chunks)
+		}
+		if chunks[0][len(chunks[0])-1].Text != "this." {
+			t.Errorf("chunk 1 should end at 'this.', got %v", chunks[0])
+		}
+	})
+	t.Run("mid-chunk sentence end also breaks", func(t *testing.T) {
+		words := []voice.Word{
+			{Text: "Hi."}, {Text: "Two"}, {Text: "three"}, {Text: "four"},
+		}
+		chunks := chunkWords(words, 3)
+		// Chunk 1 = ["Hi."], Chunk 2 = ["Two", "three", "four"]
+		if len(chunks) != 2 || len(chunks[0]) != 1 {
+			t.Errorf("expected ['Hi.'] and 3-word chunk, got %v", chunks)
+		}
+	})
+}
+
+func TestRandomPreset_Distribution(t *testing.T) {
+	// Smoke test: across 1000 picks, every preset appears at least once
+	// and PresetA dominates (heuristic check, not exact distribution).
+	counts := map[Preset]int{}
+	for range 1000 {
+		counts[RandomPreset()]++
+	}
+	for _, p := range []Preset{PresetA, PresetB, PresetC} {
+		if counts[p] == 0 {
+			t.Errorf("Preset %s never picked in 1000 trials", p)
+		}
+	}
+	// PresetA expected ~500, B ~300, C ~200. Verify A > B > C roughly.
+	if counts[PresetA] < counts[PresetB] {
+		t.Errorf("PresetA (%d) should beat PresetB (%d) on weighted random", counts[PresetA], counts[PresetB])
+	}
+}
+
+func TestParsePreset(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want Preset
+		ok   bool
+	}{
+		{"a", PresetA, true},
+		{"A", PresetA, true},
+		{"b", PresetB, true},
+		{"C", PresetC, true},
+		{"", PresetA, true},
+		{"unknown", PresetA, false},
+	} {
+		got, ok := ParsePreset(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("ParsePreset(%q) = (%v, %v), want (%v, %v)", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
 }
 
 func TestIsSentenceEnd(t *testing.T) {

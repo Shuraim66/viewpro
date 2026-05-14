@@ -15,11 +15,30 @@ import (
 
 // Script is the structured output we expect from Haiku.
 type Script struct {
-	PhenomenonName string   `json:"phenomenon_name"`
-	Hook           string   `json:"hook"`
-	Body           string   `json:"body"`
-	Twist          string   `json:"twist"`
-	Keywords       []string `json:"broll_keywords"`
+	PhenomenonName  string   `json:"phenomenon_name"`
+	Hook            string   `json:"hook"`
+	HookOverlayText string   `json:"hook_overlay_text"`
+	Body            string   `json:"body"`
+	Twist           string   `json:"twist"`
+	Keywords        []string `json:"broll_keywords"`
+}
+
+// HookOverlay returns the all-caps overlay text for the first 1.5s.
+// If the model returned hook_overlay_text it's uppercased and used;
+// otherwise we derive it from the first 5 words of Hook.
+func (s *Script) HookOverlay() string {
+	if t := strings.TrimSpace(s.HookOverlayText); t != "" {
+		return strings.ToUpper(t)
+	}
+	// Fallback: first 5 words of the spoken hook, uppercased
+	words := strings.Fields(s.Hook)
+	if len(words) == 0 {
+		return ""
+	}
+	if len(words) > 5 {
+		words = words[:5]
+	}
+	return strings.ToUpper(strings.Join(words, " "))
 }
 
 // FullText concatenates the spoken portions for TTS.
@@ -43,15 +62,30 @@ type Result struct {
 	OutputTokens int64
 }
 
-// Generate calls Haiku 4.5 and parses the response into a Script.
-// SDK handles 429/5xx retries internally (default 2).
-func (g *Generator) Generate(ctx context.Context, idea string) (*Result, error) {
+// GenerateOpts carries per-call knobs (style variant, target duration).
+// Pipeline picks these and passes them in so it can log the choices.
+type GenerateOpts struct {
+	Style             Style   // structure variant (default/question/list/story)
+	TargetDurationSec float64 // for word-count guidance to the model
+}
+
+// Generate calls Haiku 4.5 with the chosen style + target duration and
+// parses the response into a Script. SDK handles 429/5xx retries
+// internally (default 2 retries).
+func (g *Generator) Generate(ctx context.Context, idea string, opts GenerateOpts) (*Result, error) {
+	if opts.Style == "" {
+		opts.Style = StyleDefault
+	}
+	if opts.TargetDurationSec <= 0 {
+		opts.TargetDurationSec = 30
+	}
+	prompt := systemPromptFor(opts.Style, opts.TargetDurationSec)
 	msg, err := g.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:       anthropic.ModelClaudeHaiku4_5_20251001,
-		MaxTokens:   600,
+		MaxTokens:   700,
 		Temperature: anthropic.Float(0.8),
 		System: []anthropic.TextBlockParam{
-			{Text: systemPrompt},
+			{Text: prompt},
 		},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock("Idea: " + idea)),
@@ -69,6 +103,30 @@ func (g *Generator) Generate(ctx context.Context, idea string) (*Result, error) 
 		InputTokens:  msg.Usage.InputTokens,
 		OutputTokens: msg.Usage.OutputTokens,
 	}, nil
+}
+
+// editorialVoicePatterns matches the first-person observation sentences
+// the system prompt asks for. Case-insensitive substring match. Used by
+// pipeline to log whether the editorial fingerprint landed.
+var editorialVoicePatterns = []string{
+	"here's the part most people miss",
+	"what's interesting is",
+	"i noticed this pattern",
+	"the thing that gets me about this",
+	"watch this:",
+}
+
+// HasEditorialVoice returns true if body contains any of the editorial
+// voice fingerprint phrases (case-insensitive). Used by the audit log
+// to record whether the prompt's instruction was followed.
+func HasEditorialVoice(body string) bool {
+	low := strings.ToLower(body)
+	for _, p := range editorialVoicePatterns {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractText(msg *anthropic.Message) string {

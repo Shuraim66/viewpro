@@ -57,8 +57,7 @@ type pexelsVideoFile struct {
 }
 
 // defaultBrollPool is the last-resort cycle used when both the original
-// keyword and its simplification return zero portrait clips. Generic
-// enough to fit any psychology Short.
+// keyword and its simplification return zero portrait clips.
 var defaultBrollPool = []string{
 	"thinking",
 	"person alone",
@@ -70,14 +69,31 @@ var defaultBrollPool = []string{
 	"person looking down",
 }
 
+// openerPool is the curated "high-stop" fallback for the opening clip.
+// Used when the script's first keyword doesn't yield a close-up/portrait
+// clip that meets opener criteria.
+var openerPool = []string{
+	"person looking at camera",
+	"close up eyes",
+	"face close up portrait",
+	"woman looking at camera close up",
+	"man looking at camera",
+}
+
 // FetchForKeywords runs one search per keyword and returns one downloaded
-// clip per keyword. Each keyword goes through a 3-level fallback chain
-// so the pipeline doesn't lose a slot just because Pexels didn't have
-// a matching clip for an oddly-phrased query.
+// clip per keyword. The first keyword uses a stricter selection (close-up
+// + vertical aspect ≥1.6x + duration ≥3s) so the opening frame is a
+// high-attention shot, not a wide/landscape b-roll. Subsequent keywords
+// use the default 3-level fallback.
 func (c *Client) FetchForKeywords(ctx context.Context, keywords []string) ([]ClipSummary, error) {
 	var out []ClipSummary
-	for _, kw := range keywords {
-		clip := c.fetchWithFallback(ctx, kw)
+	for i, kw := range keywords {
+		var clip *ClipSummary
+		if i == 0 {
+			clip = c.fetchOpenerWithFallback(ctx, kw)
+		} else {
+			clip = c.fetchWithFallback(ctx, kw)
+		}
 		if clip != nil {
 			out = append(out, *clip)
 		}
@@ -88,12 +104,105 @@ func (c *Client) FetchForKeywords(ctx context.Context, keywords []string) ([]Cli
 	return out, nil
 }
 
+// fetchOpenerWithFallback tries (in order):
+//  1. script's first keyword, with strict opener filter (close-up tags
+//     in URL slug + height > 1.6×width + duration ≥3s)
+//  2. curated opener pool (same strict filter)
+//  3. drop strict filter and call the regular fallback chain
+func (c *Client) fetchOpenerWithFallback(ctx context.Context, keyword string) *ClipSummary {
+	if clip := c.tryQueryFiltered(ctx, keyword, openerVariant, openerFilter); clip != nil {
+		fmt.Fprintf(os.Stderr, "[visuals] opener L1 hit: %q\n", keyword)
+		return clip
+	}
+	fmt.Fprintf(os.Stderr, "[visuals] opener L1 miss for %q\n", keyword)
+	for _, q := range openerPool {
+		if clip := c.tryQueryFiltered(ctx, q, openerVariant, openerFilter); clip != nil {
+			fmt.Fprintf(os.Stderr, "[visuals] opener L2 hit: %q → %q (pool)\n", keyword, q)
+			return clip
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[visuals] opener strict failed for %q, using default fallback\n", keyword)
+	return c.fetchWithFallback(ctx, keyword)
+}
+
+// videoFilter selects (file, ok) for a candidate Pexels video.
+// Returns false if the video should be skipped entirely.
+type videoFilter func(v pexelsVideo) (*pexelsVideoFile, bool)
+
+const (
+	defaultVariant = "default-min4"
+	openerVariant  = "opener-strict-min3"
+)
+
+// defaultFilter: existing behavior — duration ≥4, any portrait file ≥1080px wide.
+func defaultFilter(v pexelsVideo) (*pexelsVideoFile, bool) {
+	if v.Duration < 4 {
+		return nil, false
+	}
+	f := bestPortraitFile(v.VideoFiles)
+	if f == nil {
+		return nil, false
+	}
+	return f, true
+}
+
+// openerFilter: strict close-up portrait — height/width >1.6, duration ≥3,
+// URL slug must contain close-up/portrait/face/head tokens.
+func openerFilter(v pexelsVideo) (*pexelsVideoFile, bool) {
+	if v.Duration < 3 {
+		return nil, false
+	}
+	if !urlSuggestsCloseup(v.URL) {
+		return nil, false
+	}
+	f := bestStrictPortraitFile(v.VideoFiles)
+	if f == nil {
+		return nil, false
+	}
+	return f, true
+}
+
+func urlSuggestsCloseup(rawURL string) bool {
+	u := strings.ToLower(rawURL)
+	for _, needle := range []string{"close-up", "closeup", "close up", "portrait", "face", "looking-at"} {
+		if strings.Contains(u, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// bestStrictPortraitFile picks an HD file with strict portrait ratio
+// (height > 1.6×width) — stricter than bestPortraitFile.
+func bestStrictPortraitFile(files []pexelsVideoFile) *pexelsVideoFile {
+	var candidates []pexelsVideoFile
+	for _, f := range files {
+		if f.FileType != "video/mp4" {
+			continue
+		}
+		if f.Width < 1080 {
+			continue
+		}
+		if float64(f.Height) <= 1.6*float64(f.Width) {
+			continue
+		}
+		candidates = append(candidates, f)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return abs(candidates[i].Width-1080) < abs(candidates[j].Width-1080)
+	})
+	return &candidates[0]
+}
+
 // fetchWithFallback tries (in order): original keyword → simplified
 // variants (drop leading filler words) → default pool. Logs which level
 // produced the clip.
 func (c *Client) fetchWithFallback(ctx context.Context, query string) *ClipSummary {
 	// Level 1: original
-	if clip := c.tryQuery(ctx, query); clip != nil {
+	if clip := c.tryQueryFiltered(ctx, query, defaultVariant, defaultFilter); clip != nil {
 		return clip
 	}
 	fmt.Fprintf(os.Stderr, "[visuals] L1 miss for %q\n", query)
@@ -103,7 +212,7 @@ func (c *Client) fetchWithFallback(ctx context.Context, query string) *ClipSumma
 		if simplified == query {
 			continue
 		}
-		if clip := c.tryQuery(ctx, simplified); clip != nil {
+		if clip := c.tryQueryFiltered(ctx, simplified, defaultVariant, defaultFilter); clip != nil {
 			fmt.Fprintf(os.Stderr, "[visuals] L2 hit: %q → %q\n", query, simplified)
 			return clip
 		}
@@ -111,7 +220,7 @@ func (c *Client) fetchWithFallback(ctx context.Context, query string) *ClipSumma
 
 	// Level 3: default pool
 	for _, fallback := range defaultBrollPool {
-		if clip := c.tryQuery(ctx, fallback); clip != nil {
+		if clip := c.tryQueryFiltered(ctx, fallback, defaultVariant, defaultFilter); clip != nil {
 			fmt.Fprintf(os.Stderr, "[visuals] L3 hit: %q → %q (pool)\n", query, fallback)
 			return clip
 		}
@@ -136,11 +245,11 @@ func simplifyKeyword(query string) []string {
 	return out
 }
 
-// tryQuery is the inner helper that performs one Pexels search + download.
-// Returns nil on any error or no-results (errors logged at warn level).
-func (c *Client) tryQuery(ctx context.Context, query string) *ClipSummary {
-	// Cache hit
-	if cached, ok := readCache(c.cacheDir, query); ok && len(cached.Meta) > 0 {
+// tryQueryFiltered performs one Pexels search and selects a clip using
+// the given filter. variant distinguishes cache keys so the opener path
+// doesn't pull a non-strict cached clip from a prior default search.
+func (c *Client) tryQueryFiltered(ctx context.Context, query, variant string, filter videoFilter) *ClipSummary {
+	if cached, ok := readCache(c.cacheDir, query, variant); ok && len(cached.Meta) > 0 {
 		clip := cached.Meta[0]
 		return &clip
 	}
@@ -149,7 +258,7 @@ func (c *Client) tryQuery(ctx context.Context, query string) *ClipSummary {
 	q.Set("query", query)
 	q.Set("orientation", "portrait")
 	q.Set("size", "medium")
-	q.Set("per_page", "10")
+	q.Set("per_page", "15")
 
 	resp, err := httpx.Do(ctx, 3, time.Second, func() (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchEndpoint+"?"+q.Encode(), nil)
@@ -178,11 +287,8 @@ func (c *Client) tryQuery(ctx context.Context, query string) *ClipSummary {
 	}
 
 	for _, v := range search.Videos {
-		if v.Duration < 4 {
-			continue
-		}
-		file := bestPortraitFile(v.VideoFiles)
-		if file == nil {
+		file, ok := filter(v)
+		if !ok {
 			continue
 		}
 		dst := clipPath(c.cacheDir, v.ID)
@@ -200,7 +306,7 @@ func (c *Client) tryQuery(ctx context.Context, query string) *ClipSummary {
 			Duration: v.Duration,
 			URL:      v.URL,
 		}
-		_ = writeCache(c.cacheDir, query, &cachedSearch{
+		_ = writeCache(c.cacheDir, query, variant, &cachedSearch{
 			ClipPaths: []string{dst},
 			Meta:      []ClipSummary{summary},
 		})

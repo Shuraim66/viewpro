@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -49,23 +50,28 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `shorts — AI YouTube Shorts generator
 
 Usage:
-  shorts generate "<idea>" [--seed-script PATH] [--dry-run]
+  shorts generate "<idea>" [flags]
   shorts rebuild  <session-dir>       # re-render the MP4 from existing artifacts
 
 Flags:
-  --seed-script PATH   reuse a prior script.json instead of calling Anthropic
-  --dry-run            generate script via Claude only, print JSON, skip TTS/video (~$0.002)
+  --seed-script PATH       reuse a prior script.json instead of calling Anthropic
+  --dry-run                generate script via Claude only, print JSON, skip TTS/video (~$0.002)
+  --script-style STYLE     default|question|list|story  (omit for weighted random)
+  --caption-preset PRESET  a|b|c                        (omit for weighted random)
+  --target-dur SECONDS     spoken target duration       (omit for weighted random ~28-32s)
+  --strict-duration        abort if voiceover exceeds target by >25%% (default: warn only)
 
 Examples:
   shorts generate "people who apologize too much"
   shorts generate "the spotlight effect" --dry-run
+  shorts generate "the spotlight effect" --script-style question --caption-preset c
   shorts generate "the spotlight effect" --seed-script output/20260514-143022/script.json
   shorts rebuild output/20260514-010619
 `)
 }
 
 func cmdGenerate(args []string) int {
-	idea, seedScript, dryRun, err := parseGenerateArgs(args)
+	parsed, err := parseGenerateArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		usage()
@@ -79,8 +85,8 @@ func cmdGenerate(args []string) int {
 	defer cancel()
 
 	// --dry-run: script only, no preflight (no ffmpeg/venv needed), no API keys except Anthropic
-	if dryRun {
-		return cmdDryRun(ctx, idea)
+	if parsed.dryRun {
+		return cmdDryRun(ctx, parsed)
 	}
 
 	// Full pipeline: sanity checks first
@@ -102,7 +108,13 @@ func cmdGenerate(args []string) int {
 	}
 
 	start := time.Now()
-	result, err := pipeline.Run(ctx, cfg, idea, seedScript)
+	result, err := pipeline.Run(ctx, cfg, parsed.idea, pipeline.RunOpts{
+		SeedScript:     parsed.seedScript,
+		ScriptStyle:    parsed.scriptStyle,
+		CaptionPreset:  parsed.captionPreset,
+		TargetDuration: parsed.targetDur,
+		StrictDuration: parsed.strictDuration,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nFAILED: %v\n", err)
 		return 1
@@ -115,53 +127,133 @@ func cmdGenerate(args []string) int {
 	fmt.Printf("Duration: %.2fs\n", result.Duration)
 	fmt.Printf("Wall:     %s\n", elapsed.Round(time.Second))
 	fmt.Printf("Preview:  mpv %s\n", result.OutputMP4)
+	printAuditSummary(result.Audit)
 	printCostSummary(result.Costs)
 	return 0
+}
+
+// generateArgs is the parsed result of `shorts generate` flags. Empty
+// scriptStyle / captionPreset / targetDur fields mean "let pipeline pick
+// a weighted-random default" — the normal case.
+type generateArgs struct {
+	idea           string
+	seedScript     string
+	dryRun         bool
+	scriptStyle    script.Style
+	captionPreset  subtitles.Preset
+	targetDur      float64
+	strictDuration bool
 }
 
 // parseGenerateArgs handles flags appearing anywhere in args, unlike
 // stdlib flag.FlagSet which stops at the first non-flag and silently
 // drops trailing flags. Pre-fix, `shorts generate "<idea>" --dry-run`
 // missed the --dry-run and ran the full pipeline.
-func parseGenerateArgs(args []string) (idea, seedScript string, dryRun bool, err error) {
+func parseGenerateArgs(args []string) (generateArgs, error) {
+	var out generateArgs
 	var positional []string
+
+	// takeValue returns the next arg for a flag like `--name VALUE` or
+	// extracts it from `--name=VALUE`. Updates i in caller via return.
+	takeValue := func(i int, name string) (string, int, error) {
+		a := args[i]
+		if strings.Contains(a, "=") {
+			return strings.SplitN(a, "=", 2)[1], i + 1, nil
+		}
+		if i+1 >= len(args) {
+			return "", 0, fmt.Errorf("%s requires a value", name)
+		}
+		return args[i+1], i + 2, nil
+	}
+
 	i := 0
 	for i < len(args) {
 		a := args[i]
 		switch {
 		case a == "--dry-run":
-			dryRun = true
+			out.dryRun = true
 			i++
-		case a == "--seed-script":
-			if i+1 >= len(args) {
-				return "", "", false, fmt.Errorf("--seed-script requires a path")
+		case a == "--strict-duration":
+			out.strictDuration = true
+			i++
+		case a == "--seed-script" || strings.HasPrefix(a, "--seed-script="):
+			v, ni, err := takeValue(i, "--seed-script")
+			if err != nil {
+				return generateArgs{}, err
 			}
-			seedScript = args[i+1]
-			i += 2
-		case strings.HasPrefix(a, "--seed-script="):
-			seedScript = strings.TrimPrefix(a, "--seed-script=")
-			i++
+			out.seedScript = v
+			i = ni
+		case a == "--script-style" || strings.HasPrefix(a, "--script-style="):
+			v, ni, err := takeValue(i, "--script-style")
+			if err != nil {
+				return generateArgs{}, err
+			}
+			style, ok := script.ParseStyle(v)
+			if !ok {
+				return generateArgs{}, fmt.Errorf("--script-style: unknown %q (want default|question|list|story)", v)
+			}
+			out.scriptStyle = style
+			i = ni
+		case a == "--caption-preset" || strings.HasPrefix(a, "--caption-preset="):
+			v, ni, err := takeValue(i, "--caption-preset")
+			if err != nil {
+				return generateArgs{}, err
+			}
+			preset, ok := subtitles.ParsePreset(v)
+			if !ok {
+				return generateArgs{}, fmt.Errorf("--caption-preset: unknown %q (want a|b|c)", v)
+			}
+			out.captionPreset = preset
+			i = ni
+		case a == "--target-dur" || strings.HasPrefix(a, "--target-dur="):
+			v, ni, err := takeValue(i, "--target-dur")
+			if err != nil {
+				return generateArgs{}, err
+			}
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || f <= 0 {
+				return generateArgs{}, fmt.Errorf("--target-dur: bad seconds value %q", v)
+			}
+			out.targetDur = f
+			i = ni
 		case a == "--":
 			positional = append(positional, args[i+1:]...)
 			i = len(args)
 		case strings.HasPrefix(a, "-"):
-			return "", "", false, fmt.Errorf("unknown flag: %s", a)
+			return generateArgs{}, fmt.Errorf("unknown flag: %s", a)
 		default:
 			positional = append(positional, a)
 			i++
 		}
 	}
 	if len(positional) == 0 {
-		return "", "", false, fmt.Errorf("missing idea argument")
+		return generateArgs{}, fmt.Errorf("missing idea argument")
 	}
-	return strings.Join(positional, " "), seedScript, dryRun, nil
+	out.idea = strings.Join(positional, " ")
+	return out, nil
 }
 
 // cmdDryRun runs only the Claude script generation step. Useful for
 // iterating on hook quality without burning ElevenLabs credits.
-func cmdDryRun(ctx context.Context, idea string) int {
+//
+// Picks a random style + target duration unless --script-style /
+// --target-dur were supplied, so the printed JSON reflects what the
+// full pipeline would have generated.
+func cmdDryRun(ctx context.Context, args generateArgs) int {
 	apiKey := mustEnv("ANTHROPIC_API_KEY")
-	sr, err := script.New(apiKey).Generate(ctx, idea)
+	style := args.scriptStyle
+	if style == "" {
+		style = script.RandomStyle()
+	}
+	targetDur := args.targetDur
+	if targetDur <= 0 {
+		targetDur = pipeline.RandomTargetDuration()
+	}
+	fmt.Fprintf(os.Stderr, "[dry-run] style=%s target=%.1fs\n", style, targetDur)
+	sr, err := script.New(apiKey).Generate(ctx, args.idea, script.GenerateOpts{
+		Style:             style,
+		TargetDurationSec: targetDur,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		return 1
@@ -180,6 +272,24 @@ func cmdDryRun(ctx context.Context, idea string) int {
 	costs.TotalUSD = costs.ClaudeUSD
 	printCostSummary(costs)
 	return 0
+}
+
+// printAuditSummary prints the per-run variant decisions captured in
+// audit.json. Useful at-a-glance proof that the pipeline rotated styles
+// across uploads (the whole point of the variation batch).
+func printAuditSummary(a pipeline.Audit) {
+	fmt.Println()
+	fmt.Println("=== Run audit ===")
+	fmt.Printf("Style:    %s\n", a.ScriptStyle)
+	fmt.Printf("Preset:   %s\n", a.CaptionPreset)
+	fmt.Printf("Music:    %s\n", a.MusicFile)
+	fmt.Printf("Target:   %.1fs  (actual %.2fs)\n", a.TargetDurSec, a.ActualDurSec)
+	fmt.Printf("Overlay:  %q\n", a.HookOverlayText)
+	editorial := "yes"
+	if !a.EditorialVoiceFound {
+		editorial = "NO (prompt instruction missed)"
+	}
+	fmt.Printf("Editorial voice: %s\n", editorial)
 }
 
 func printCostSummary(c pipeline.Costs) {
@@ -231,15 +341,20 @@ func cmdRebuild(args []string) int {
 		return 1
 	}
 
+	// Read hook overlay text from script.json. Missing field (older
+	// session before this feature) is handled by Script.HookOverlay()
+	// which derives from the hook field.
+	hookOverlay := readHookOverlay(filepath.Join(sessionDir, "script.json"))
+
 	// Regenerate captions.ass with current subtitles.Defaults().
 	// The original .ass is overwritten — its content is fully derivable
-	// from alignment.json + current code, so no data loss.
+	// from alignment.json + script.json + current code, so no data loss.
 	assPath := filepath.Join(sessionDir, "captions.ass")
-	if err := subtitles.Write(assPath, words, subtitles.Defaults()); err != nil {
+	if err := subtitles.Write(assPath, words, hookOverlay, subtitles.Defaults()); err != nil {
 		fmt.Fprintf(os.Stderr, "regen captions: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "[rebuild] regenerated captions.ass (%d words)\n", len(words))
+	fmt.Fprintf(os.Stderr, "[rebuild] regenerated captions.ass (%d words, hook=%q)\n", len(words), hookOverlay)
 
 	fontsDir, _ := filepath.Abs(filepath.Join(envDefault("ASSETS_DIR", "assets"), "fonts"))
 	bgPath, _ := filepath.Abs(envDefault("BACKGROUND_MUSIC", "assets/music/bg.mp3"))
@@ -274,6 +389,22 @@ func cmdRebuild(args []string) int {
 	}
 	fmt.Printf("=== DONE ===\nOutput: %s\nWall:   %s\n", outputPath, time.Since(start).Round(time.Second))
 	return 0
+}
+
+// readHookOverlay loads script.json and returns the hook overlay text.
+// Uses script.Script.HookOverlay() which falls back to deriving from the
+// hook field if hook_overlay_text is missing (older sessions).
+// Returns "" on any error so rebuild still works without the overlay.
+func readHookOverlay(scriptPath string) string {
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return ""
+	}
+	var s script.Script
+	if err := json.Unmarshal(data, &s); err != nil {
+		return ""
+	}
+	return s.HookOverlay()
 }
 
 // loadAlignment reads alignment.json and returns the words plus duration

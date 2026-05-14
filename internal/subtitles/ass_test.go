@@ -70,6 +70,33 @@ func TestRenderText_ClampedAtEdges(t *testing.T) {
 	}
 }
 
+func TestRenderText_Window1(t *testing.T) {
+	words := []voice.Word{
+		{Text: "one"}, {Text: "two"}, {Text: "three"}, {Text: "four"}, {Text: "five"},
+	}
+	t.Run("middle word: 1 before + active + 1 after = 3 words", func(t *testing.T) {
+		got := renderText(words, 2, 1)
+		want := "two {\\c&H0000FFFF&}three{\\c&H00FFFFFF&} four"
+		if got != want {
+			t.Errorf("got %q\nwant %q", got, want)
+		}
+	})
+	t.Run("first word: 0 before + active + 1 after = 2 words", func(t *testing.T) {
+		got := renderText(words, 0, 1)
+		want := "{\\c&H0000FFFF&}one{\\c&H00FFFFFF&} two"
+		if got != want {
+			t.Errorf("got %q\nwant %q", got, want)
+		}
+	})
+	t.Run("last word: 1 before + active + 0 after = 2 words", func(t *testing.T) {
+		got := renderText(words, 4, 1)
+		want := "four {\\c&H0000FFFF&}five{\\c&H00FFFFFF&}"
+		if got != want {
+			t.Errorf("got %q\nwant %q", got, want)
+		}
+	})
+}
+
 func TestIsSentenceEnd(t *testing.T) {
 	for _, tt := range []struct {
 		in   string

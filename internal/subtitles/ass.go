@@ -22,19 +22,30 @@ type Options struct {
 	FontName   string // exact family name as fontconfig sees it
 	FontSize   int    // pt
 	WindowSize int    // words on each side of the active word
+	MarginL    int    // pixels from left edge
+	MarginR    int    // pixels from right edge
 	MarginV    int    // pixels from bottom edge (Alignment 2)
 }
 
 func Defaults() Options {
 	return Options{
-		FontName:   "Montserrat ExtraBold",
-		FontSize:   70,
-		WindowSize: 2,
-		// 480 px ≈ 25% of 1920 vertical, clears YouTube's mobile Shorts
-		// UI chrome (title, handle, action buttons) which overlays the
-		// bottom quarter of the player. Alignment stays at 2 (bottom-
-		// centered) — we're just lifting the bottom anchor.
-		MarginV: 480,
+		FontName: "Montserrat ExtraBold",
+		FontSize: 70,
+		// 1 word on each side of the active word → max 3 words per Dialogue
+		// line. Single line always fits in the 760px safe zone (1080 − 2×160)
+		// even when all three words are long. Tested 2-each-side (window=2)
+		// previously and saw long-word phrases clip on the left/right edges.
+		WindowSize: 1,
+		// Horizontal margin 160 px ≈ 15% of 1080 width on each side.
+		// Prevents text from clipping on left/right edges of the frame
+		// at long-word break points (mobile YouTube Shorts player has
+		// a small visual inset too).
+		MarginL: 160,
+		MarginR: 160,
+		// Vertical margin 420 px clears YouTube's mobile Shorts UI chrome
+		// (title, handle, action buttons) while staying safely below the
+		// top-bar overlay. 480 was tested too close to the title bar.
+		MarginV: 420,
 	}
 }
 
@@ -47,7 +58,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,%s,%d,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,4,0,2,40,40,%d,1
+Style: Default,%s,%d,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,4,0,2,%d,%d,%d,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -66,7 +77,7 @@ func Write(path string, words []voice.Word, opts Options) error {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, header, opts.FontName, opts.FontSize, opts.MarginV)
+	fmt.Fprintf(&b, header, opts.FontName, opts.FontSize, opts.MarginL, opts.MarginR, opts.MarginV)
 
 	for i, w := range words {
 		start := w.Start

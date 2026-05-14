@@ -10,7 +10,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +22,8 @@ import (
 	"viewpro/internal/assembly"
 	"viewpro/internal/pipeline"
 	"viewpro/internal/script"
+	"viewpro/internal/subtitles"
+	"viewpro/internal/voice"
 )
 
 func main() {
@@ -64,17 +65,12 @@ Examples:
 }
 
 func cmdGenerate(args []string) int {
-	fs := flag.NewFlagSet("generate", flag.ExitOnError)
-	seedScript := fs.String("seed-script", "", "reuse a prior script.json instead of calling Anthropic")
-	dryRun := fs.Bool("dry-run", false, "generate script only, print JSON, skip TTS/video")
-	_ = fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "missing idea argument")
+	idea, seedScript, dryRun, err := parseGenerateArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		usage()
 		return 2
 	}
-	idea := strings.Join(fs.Args(), " ")
 
 	// Load .env if present
 	loadDotEnv(".env")
@@ -83,7 +79,7 @@ func cmdGenerate(args []string) int {
 	defer cancel()
 
 	// --dry-run: script only, no preflight (no ffmpeg/venv needed), no API keys except Anthropic
-	if *dryRun {
+	if dryRun {
 		return cmdDryRun(ctx, idea)
 	}
 
@@ -106,7 +102,7 @@ func cmdGenerate(args []string) int {
 	}
 
 	start := time.Now()
-	result, err := pipeline.Run(ctx, cfg, idea, *seedScript)
+	result, err := pipeline.Run(ctx, cfg, idea, seedScript)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nFAILED: %v\n", err)
 		return 1
@@ -121,6 +117,44 @@ func cmdGenerate(args []string) int {
 	fmt.Printf("Preview:  mpv %s\n", result.OutputMP4)
 	printCostSummary(result.Costs)
 	return 0
+}
+
+// parseGenerateArgs handles flags appearing anywhere in args, unlike
+// stdlib flag.FlagSet which stops at the first non-flag and silently
+// drops trailing flags. Pre-fix, `shorts generate "<idea>" --dry-run`
+// missed the --dry-run and ran the full pipeline.
+func parseGenerateArgs(args []string) (idea, seedScript string, dryRun bool, err error) {
+	var positional []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case a == "--dry-run":
+			dryRun = true
+			i++
+		case a == "--seed-script":
+			if i+1 >= len(args) {
+				return "", "", false, fmt.Errorf("--seed-script requires a path")
+			}
+			seedScript = args[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--seed-script="):
+			seedScript = strings.TrimPrefix(a, "--seed-script=")
+			i++
+		case a == "--":
+			positional = append(positional, args[i+1:]...)
+			i = len(args)
+		case strings.HasPrefix(a, "-"):
+			return "", "", false, fmt.Errorf("unknown flag: %s", a)
+		default:
+			positional = append(positional, a)
+			i++
+		}
+	}
+	if len(positional) == 0 {
+		return "", "", false, fmt.Errorf("missing idea argument")
+	}
+	return strings.Join(positional, " "), seedScript, dryRun, nil
 }
 
 // cmdDryRun runs only the Claude script generation step. Useful for
@@ -188,12 +222,24 @@ func cmdRebuild(args []string) int {
 		return 1
 	}
 
-	// Voice duration from alignment.json (last word's end)
-	duration, err := readDurationFromAlignment(filepath.Join(sessionDir, "alignment.json"))
+	// Load words from alignment.json — both for duration AND so we can
+	// regenerate captions.ass with the current subtitles code (picks up
+	// any margin/style/code changes since the original run).
+	words, duration, err := loadAlignment(filepath.Join(sessionDir, "alignment.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read alignment.json: %v\n", err)
 		return 1
 	}
+
+	// Regenerate captions.ass with current subtitles.Defaults().
+	// The original .ass is overwritten — its content is fully derivable
+	// from alignment.json + current code, so no data loss.
+	assPath := filepath.Join(sessionDir, "captions.ass")
+	if err := subtitles.Write(assPath, words, subtitles.Defaults()); err != nil {
+		fmt.Fprintf(os.Stderr, "regen captions: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "[rebuild] regenerated captions.ass (%d words)\n", len(words))
 
 	fontsDir, _ := filepath.Abs(filepath.Join(envDefault("ASSETS_DIR", "assets"), "fonts"))
 	bgPath, _ := filepath.Abs(envDefault("BACKGROUND_MUSIC", "assets/music/bg.mp3"))
@@ -202,17 +248,26 @@ func cmdRebuild(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	fmt.Fprintf(os.Stderr, "[rebuild] %d segments, %.2fs voice, output → %s\n", len(segs), duration, outputPath)
+	// Music auto-leveling against the existing voice.mp3
+	voicePath := filepath.Join(sessionDir, "voice.mp3")
+	voiceMean, err := assembly.ProbeMeanVolume(ctx, voicePath)
+	if err != nil {
+		voiceMean = -18
+	}
+	musicVol := assembly.MusicVolumeForVoice(voiceMean)
+	fmt.Fprintf(os.Stderr, "[rebuild] %d segments, %.2fs voice, music vol=%.3f, output → %s\n", len(segs), duration, musicVol, outputPath)
+
 	start := time.Now()
 	if err := assembly.Build(ctx, assembly.Inputs{
-		Segments:   segs,
-		VoicePath:  filepath.Join(sessionDir, "voice.mp3"),
-		MusicPath:  bgPath,
-		ASSPath:    filepath.Join(sessionDir, "captions.ass"),
-		FontsDir:   fontsDir,
-		Duration:   duration,
-		OutputPath: outputPath,
-		SessionDir: sessionDir,
+		Segments:    segs,
+		VoicePath:   voicePath,
+		MusicPath:   bgPath,
+		ASSPath:     assPath,
+		FontsDir:    fontsDir,
+		Duration:    duration,
+		OutputPath:  outputPath,
+		SessionDir:  sessionDir,
+		MusicVolume: musicVol,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		return 1
@@ -221,25 +276,24 @@ func cmdRebuild(args []string) int {
 	return 0
 }
 
-// readDurationFromAlignment reads alignment.json and returns the last
-// word's End timestamp.
-func readDurationFromAlignment(path string) (float64, error) {
+// loadAlignment reads alignment.json and returns the words plus duration
+// (last word's End). Used by rebuild so it can regenerate captions.ass
+// against current subtitles code.
+func loadAlignment(path string) ([]voice.Word, float64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	var parsed struct {
-		Words []struct {
-			End float64 `json:"end"`
-		} `json:"words"`
+		Words []voice.Word `json:"words"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	if len(parsed.Words) == 0 {
-		return 0, fmt.Errorf("no words in alignment.json")
+		return nil, 0, fmt.Errorf("no words in alignment.json")
 	}
-	return parsed.Words[len(parsed.Words)-1].End, nil
+	return parsed.Words, parsed.Words[len(parsed.Words)-1].End, nil
 }
 
 // preflight verifies that the system can run the pipeline.

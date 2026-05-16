@@ -110,9 +110,18 @@ GOOD example: "Here's the part most people miss — you're not choosing to
 think about it."
 BAD example: "My friend Sarah told me she once spent two hours doing this."
 
-KEYWORDS (broll_keywords): 4-6 concrete visual nouns for stock video
-search. Must be filmable. Good: "person checking phone", "eyes close up",
-"hand reaching for door". Bad: "anxiety", "memory", "feelings".
+BROLL_KEYWORDS (broll_keywords): Provide 4-6 stock-video search phrases.
+Each phrase MUST follow these rules:
+- 4-6 words describing a clearly visible, specific scene.
+- A filmable action or scene, never an abstract noun. Good: "person
+  checking phone in kitchen". Bad: "anxiety", "memory", "feelings".
+- NEVER use ambiguous words — they pull off-topic or unsafe stock
+  footage: "intimate", "threshold" (returns bedroom shots), "exposed",
+  "raw", "vulnerable".
+- Describe the visible action, not an abstract emotion: write "person
+  looking around confused", not "feeling lost".
+- Specify a location when natural: "in office", "in kitchen",
+  "outdoor walking", "at desk".
 
 HOOK_OVERLAY_TEXT (4-6 words, all caps): A condensed scroll-stopper for
 the first 1.5 seconds. Punchier and shorter than the spoken hook.

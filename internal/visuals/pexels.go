@@ -39,12 +39,13 @@ type pexelsSearchResp struct {
 }
 
 type pexelsVideo struct {
-	ID         int                 `json:"id"`
-	Width      int                 `json:"width"`
-	Height     int                 `json:"height"`
-	Duration   int                 `json:"duration"`
-	URL        string              `json:"url"`
-	VideoFiles []pexelsVideoFile   `json:"video_files"`
+	ID         int               `json:"id"`
+	Width      int               `json:"width"`
+	Height     int               `json:"height"`
+	Duration   int               `json:"duration"`
+	URL        string            `json:"url"`
+	Tags       []string          `json:"tags"`
+	VideoFiles []pexelsVideoFile `json:"video_files"`
 }
 
 type pexelsVideoFile struct {
@@ -95,6 +96,9 @@ func (c *Client) FetchForKeywords(ctx context.Context, keywords []string) ([]Cli
 			clip = c.fetchWithFallback(ctx, kw)
 		}
 		if clip != nil {
+			// Stamp the original script keyword (clip may have been
+			// found via a simplified or pool fallback query).
+			clip.KeywordRequested = kw
 			out = append(out, *clip)
 		}
 	}
@@ -251,7 +255,13 @@ func simplifyKeyword(query string) []string {
 func (c *Client) tryQueryFiltered(ctx context.Context, query, variant string, filter videoFilter) *ClipSummary {
 	if cached, ok := readCache(c.cacheDir, query, variant); ok && len(cached.Meta) > 0 {
 		clip := cached.Meta[0]
-		return &clip
+		// Re-screen cached clips: the blocked-terms list may have grown
+		// since this clip was cached, or the clip predates the filter.
+		if term := blockedTermIn(clipMetadata(clip.URL, clip.Tags)); term != "" {
+			fmt.Fprintf(os.Stderr, "[visuals] safety: cached clip for %q has blocked term %q, re-searching\n", query, term)
+		} else {
+			return &clip
+		}
 	}
 
 	q := url.Values{}
@@ -286,16 +296,41 @@ func (c *Client) tryQueryFiltered(ctx context.Context, query, variant string, fi
 		return nil
 	}
 
+	// Screen + rank all candidates before downloading anything, so the
+	// chosen clip is the safest, best-niche-fit result — not just the
+	// first one Pexels happened to return.
+	type scored struct {
+		v     pexelsVideo
+		file  *pexelsVideoFile
+		score int
+	}
+	var candidates []scored
 	for _, v := range search.Videos {
 		file, ok := filter(v)
 		if !ok {
 			continue
 		}
+		meta := clipMetadata(v.URL, v.Tags)
+		if term := blockedTermIn(meta); term != "" {
+			fmt.Fprintf(os.Stderr, "[visuals] safety: skip video %d for %q — blocked term %q (%s)\n",
+				v.ID, query, term, v.URL)
+			continue
+		}
+		candidates = append(candidates, scored{v, file, preferredScore(meta)})
+	}
+	// Stable sort by preferred-term score, descending. Stable keeps
+	// Pexels' own relevance order as the tiebreaker within equal scores.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	for _, cand := range candidates {
+		v, file := cand.v, cand.file
 		dst := clipPath(c.cacheDir, v.ID)
 		if _, err := os.Stat(dst); err != nil {
 			if err := c.download(ctx, file.Link, dst); err != nil {
-				fmt.Fprintf(os.Stderr, "[visuals] download error: %v\n", err)
-				return nil
+				fmt.Fprintf(os.Stderr, "[visuals] download error for %q: %v\n", query, err)
+				continue // try the next-best candidate
 			}
 		}
 		summary := ClipSummary{
@@ -305,6 +340,7 @@ func (c *Client) tryQueryFiltered(ctx context.Context, query, variant string, fi
 			Height:   file.Height,
 			Duration: v.Duration,
 			URL:      v.URL,
+			Tags:     v.Tags,
 		}
 		_ = writeCache(c.cacheDir, query, variant, &cachedSearch{
 			ClipPaths: []string{dst},

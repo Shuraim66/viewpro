@@ -163,8 +163,19 @@ func Run(ctx context.Context, cfg Config, idea string, opts RunOpts) (*Result, e
 		return nil, fmt.Errorf("visuals: %w", err)
 	}
 	clipPaths := make([]string, len(clips))
+	brollReview := make([]BrollReviewItem, len(clips))
 	for i, c := range clips {
 		clipPaths[i] = c.Path
+		tags := c.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		brollReview[i] = BrollReviewItem{
+			KeywordRequested: c.KeywordRequested,
+			PexelsURL:        c.URL,
+			SelectedPath:     c.Path,
+			TagsReturned:     tags,
+		}
 	}
 	logStep("visuals", fmt.Sprintf("got %d clips", len(clips)))
 
@@ -237,6 +248,7 @@ func Run(ctx context.Context, cfg Config, idea string, opts RunOpts) (*Result, e
 		ActualDurSec:        vr.Duration,
 		HookOverlayText:     hookOverlay,
 		EditorialVoiceFound: editorialVoice,
+		BrollReview:         brollReview,
 		ClaudeUSD:           costs.ClaudeUSD,
 		ElevenLabsUSD:       costs.ElevenLabsUSD,
 		TotalUSD:            costs.TotalUSD,

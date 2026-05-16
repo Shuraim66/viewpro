@@ -26,6 +26,14 @@ type ClipSummary struct {
 	Height   int    `json:"height"`
 	Duration int    `json:"duration"`
 	URL      string `json:"url"`
+
+	// KeywordRequested is the original script keyword this clip was
+	// fetched for (not the simplified/pool variant that found it).
+	// Stamped by FetchForKeywords; feeds the audit broll_review log.
+	KeywordRequested string `json:"keyword_requested,omitempty"`
+	// Tags returned by Pexels for the selected video. Used for safety
+	// re-screening of cached clips and for the audit broll_review log.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // searchKey hashes (query, variant). variant distinguishes search criteria

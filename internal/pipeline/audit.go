@@ -20,6 +20,11 @@ type Audit struct {
 	HookOverlayText     string `json:"hook_overlay_text"`
 	EditorialVoiceFound bool   `json:"editorial_voice_found"`
 
+	// Visual content review — one entry per selected b-roll clip, so
+	// off-topic or advertiser-unfriendly Pexels matches can be traced
+	// in post-review and the blocked-terms list tuned over time.
+	BrollReview []BrollReviewItem `json:"broll_review"`
+
 	// Cost rollup
 	ClaudeUSD     float64 `json:"claude_usd"`
 	ElevenLabsUSD float64 `json:"elevenlabs_usd"`
@@ -27,4 +32,14 @@ type Audit struct {
 
 	// Outputs
 	OutputMP4 string `json:"output_mp4"`
+}
+
+// BrollReviewItem traces one selected Pexels clip back to the keyword
+// that requested it, so a human reviewer can spot keyword→clip
+// mismatches (e.g. "threshold" → bedroom footage) after the fact.
+type BrollReviewItem struct {
+	KeywordRequested string   `json:"keyword_requested"`
+	PexelsURL        string   `json:"pexels_url"`
+	SelectedPath     string   `json:"selected_path"`
+	TagsReturned     []string `json:"tags_returned"`
 }

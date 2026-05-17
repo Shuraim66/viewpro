@@ -85,22 +85,31 @@ func Build(ctx context.Context, in Inputs) error {
 	var parts []string
 
 	// Per-segment chain:
-	//   [k:v]trim=0:dur,setpts=PTS-STARTPTS,fps=30,scale...,crop...,setsar=1[v_i]
+	//   [k:v]trim=in:in+dur,setpts=PTS-STARTPTS,fps=30,scale...,crop...,setsar=1[v_i]
 	// Order is load-bearing:
-	//   - trim cuts the source window
+	//   - trim cuts the source window [in, in+dur] (in>0 skips intro frames)
 	//   - setpts=PTS-STARTPTS resets to 0 (required by concat filter)
 	//   - fps=30 resamples to uniform rate on the reset clock
 	//   - scale/crop normalize geometry
 	for i, s := range in.Segments {
 		k := inputIdx[s.ClipPath]
 		dur := s.OutPoint
-		if maxDur := clipDur[s.ClipPath]; maxDur > 0 && dur > maxDur {
-			fmt.Fprintf(os.Stderr, "[assembly] WARN segment %d: outpoint %.3f > clip duration %.3f, clamping\n", i, dur, maxDur)
-			dur = maxDur
+		in := s.InPoint
+		if maxDur := clipDur[s.ClipPath]; maxDur > 0 && in+dur > maxDur {
+			// The source window [in, in+dur] overruns the clip. Keep the
+			// on-screen duration (it's beat-synced) — pull InPoint back
+			// before shortening the segment.
+			in = maxDur - dur
+			if in < 0 {
+				fmt.Fprintf(os.Stderr, "[assembly] WARN segment %d: duration %.3f > clip duration %.3f, clamping\n", i, dur, maxDur)
+				in, dur = 0, maxDur
+			} else if s.InPoint > 0 {
+				fmt.Fprintf(os.Stderr, "[assembly] WARN segment %d: intro-skip %.3f → %.3f to fit clip duration %.3f\n", i, s.InPoint, in, maxDur)
+			}
 		}
 		parts = append(parts, fmt.Sprintf(
-			"[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS,fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v%d]",
-			k, dur, i,
+			"[%d:v]trim=%.3f:%.3f,setpts=PTS-STARTPTS,fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v%d]",
+			k, in, in+dur, i,
 		))
 	}
 

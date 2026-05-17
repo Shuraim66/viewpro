@@ -49,17 +49,100 @@ func TestPlanCuts(t *testing.T) {
 }
 
 func TestAssignClips(t *testing.T) {
-	cuts := []float64{0, 2.5, 5.0, 7.5}
-	clips := []string{"a.mp4", "b.mp4"}
+	cuts := []float64{0, 2.5, 5.0, 7.5, 10.0, 12.5} // 5 segments
+	clips := []string{"opener.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"}
 	segs := AssignClips(cuts, clips)
-	if len(segs) != 3 {
-		t.Fatalf("want 3 segments, got %d", len(segs))
+	if len(segs) != 5 {
+		t.Fatalf("want 5 segments, got %d", len(segs))
 	}
-	if segs[0].ClipPath != "a.mp4" || segs[1].ClipPath != "b.mp4" || segs[2].ClipPath != "a.mp4" {
-		t.Errorf("round-robin failed: %+v", segs)
+	// Segment 0 is always pinned to the opener (clips[0]).
+	if segs[0].ClipPath != "opener.mp4" {
+		t.Errorf("segment 0: want opener.mp4, got %q", segs[0].ClipPath)
 	}
 	if math.Abs(segs[0].OutPoint-2.5) > 1e-9 {
 		t.Errorf("outpoint wrong: %f", segs[0].OutPoint)
+	}
+	// First segment skips the clip intro; the rest start at clip t=0.
+	if math.Abs(segs[0].InPoint-firstSegmentIntroSkip) > 1e-9 {
+		t.Errorf("segment 0 InPoint: want %f, got %f", firstSegmentIntroSkip, segs[0].InPoint)
+	}
+	for i := 1; i < len(segs); i++ {
+		if segs[i].InPoint != 0 {
+			t.Errorf("segment %d InPoint: want 0, got %f", i, segs[i].InPoint)
+		}
+	}
+	// Every clip path is from the input set.
+	known := map[string]bool{}
+	for _, c := range clips {
+		known[c] = true
+	}
+	for i, s := range segs {
+		if !known[s.ClipPath] {
+			t.Errorf("segment %d: unknown clip %q", i, s.ClipPath)
+		}
+	}
+	// 5 clips, 5 segments → pool not exhausted → no clip repeats.
+	seen := map[string]bool{}
+	for _, s := range segs {
+		if seen[s.ClipPath] {
+			t.Errorf("clip %q repeated before pool exhausted: %+v", s.ClipPath, segs)
+		}
+		seen[s.ClipPath] = true
+	}
+}
+
+func TestClipPool(t *testing.T) {
+	clips := []string{"a", "b", "c", "d", "e", "f"}
+	pool := newClipPool(clips)
+	const draws = 18
+	got := make([]string, 0, draws)
+	for i := 0; i < draws; i++ {
+		got = append(got, pool.next(i))
+	}
+	// No-repeat-until-exhausted: each block of len(clips) draws is a
+	// permutation of the pool — no clip appears twice within a block.
+	for block := 0; block*len(clips) < len(got); block++ {
+		seen := map[string]bool{}
+		for j := block * len(clips); j < (block+1)*len(clips) && j < len(got); j++ {
+			if seen[got[j]] {
+				t.Errorf("block %d: %q repeated before pool exhausted: %v", block, got[j], got)
+			}
+			seen[got[j]] = true
+		}
+	}
+	// Cooldown: with 6 clips and cooldown 3, no clip reappears within
+	// clipCooldown segments of its last placement.
+	last := map[string]int{}
+	for i, c := range got {
+		if prev, ok := last[c]; ok && i-prev <= clipCooldown {
+			t.Errorf("clip %q reused at seg %d, only %d after seg %d (cooldown %d)", c, i, i-prev, prev, clipCooldown)
+		}
+		last[c] = i
+	}
+}
+
+func TestSummarizeClipUsage(t *testing.T) {
+	segs := []Segment{
+		{ClipPath: "a"}, {ClipPath: "b"}, {ClipPath: "c"},
+		{ClipPath: "a"}, {ClipPath: "d"},
+	}
+	u := SummarizeClipUsage(segs)
+	if u.Segments != 5 {
+		t.Errorf("Segments = %d, want 5", u.Segments)
+	}
+	if u.UniqueClips != 4 {
+		t.Errorf("UniqueClips = %d, want 4", u.UniqueClips)
+	}
+	if u.MaxRepeats != 2 {
+		t.Errorf("MaxRepeats = %d, want 2", u.MaxRepeats)
+	}
+	if u.MinGap != 3 { // "a" at index 0 and 3
+		t.Errorf("MinGap = %d, want 3", u.MinGap)
+	}
+
+	// No repeats → MinGap is -1.
+	if g := SummarizeClipUsage([]Segment{{ClipPath: "x"}, {ClipPath: "y"}}).MinGap; g != -1 {
+		t.Errorf("MinGap with no repeats = %d, want -1", g)
 	}
 }
 

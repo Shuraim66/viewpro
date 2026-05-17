@@ -193,7 +193,13 @@ func Run(ctx context.Context, cfg Config, idea string, opts RunOpts) (*Result, e
 	if len(segs) == 0 {
 		return nil, fmt.Errorf("cutplan produced 0 segments (cuts=%v clips=%d)", cuts, len(clips))
 	}
-	logStep("cutplan", fmt.Sprintf("%d segments", len(segs)))
+	usage := beats.SummarizeClipUsage(segs)
+	gap := "n/a"
+	if usage.MinGap >= 0 {
+		gap = fmt.Sprintf("%d segments", usage.MinGap)
+	}
+	logStep("cutplan", fmt.Sprintf("%d segments, %d unique clips, max repeats: %d, min gap: %s",
+		usage.Segments, usage.UniqueClips, usage.MaxRepeats, gap))
 
 	// 7. Subtitles (with chosen preset)
 	logStep("subtitles", fmt.Sprintf("rendering ASS (preset %s)…", preset))

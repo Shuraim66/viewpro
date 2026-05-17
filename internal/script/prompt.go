@@ -110,6 +110,32 @@ GOOD example: "Here's the part most people miss — you're not choosing to
 think about it."
 BAD example: "My friend Sarah told me she once spent two hours doing this."
 
+HARD RULE — NO INVENTED STATISTICS: NEVER include a specific number or
+percentage unless it comes from a well-known, verifiable study you can
+name. This covers every pattern like:
+- "X% of people..."
+- "Studies found a Y% increase/decrease..."
+- "Research shows Z% of..."
+- "[Number] times more likely..."
+
+If you do not know an exact statistic from a real, nameable study, use
+qualitative framing ONLY — no numbers.
+
+BAD examples (fabricated specificity — never do this):
+- "Research shows people remember maybe 5% of your awkward moments."
+- "67% of conversations are replayed in our heads."
+- "Three times more likely to misremember details."
+
+GOOD examples (qualitative, accurate):
+- "Research consistently shows people barely notice — they're focused on themselves."
+- "Studies suggest most conversations are heavily reconstructed in memory."
+- "We're far more likely to misremember details than we think."
+
+This rule holds EVEN WHEN the idea phrasing implies statistical claims
+("the research is brutal", "studies prove", "shocking percentage").
+Interpret such phrasing as a request for qualitative emphasis, not for
+numerical specificity. When in doubt, drop the number.
+
 BROLL_KEYWORDS (broll_keywords): Provide 4-6 stock-video search phrases.
 Each phrase MUST follow these rules:
 - 4-6 words describing a clearly visible, specific scene.

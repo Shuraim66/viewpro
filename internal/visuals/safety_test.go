@@ -25,6 +25,48 @@ func TestBlockedTermIn(t *testing.T) {
 	}
 }
 
+func TestSoftIntroTermIn(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		tags []string
+		want string
+	}{
+		{"clean portrait", "https://www.pexels.com/video/man-looking-at-camera-1/", nil, ""},
+		{"bokeh in slug", "https://www.pexels.com/video/expressive-portrait-with-bokeh-background-2/", nil, "bokeh"},
+		{"soft focus across hyphens", "https://www.pexels.com/video/woman-in-soft-focus-3/", nil, "soft focus"},
+		{"term in tag", "https://www.pexels.com/video/clip-4/", []string{"moody", "evening"}, "moody"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := softIntroTermIn(clipMetadata(tc.url, tc.tags)); got != tc.want {
+				t.Errorf("softIntroTermIn(%q, %v) = %q, want %q", tc.url, tc.tags, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScreenRecordingTermIn(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		tags []string
+		want string
+	}{
+		{"clean", "https://www.pexels.com/video/person-holding-phone-1/", nil, ""},
+		{"phone screen in slug", "https://www.pexels.com/video/close-up-of-phone-screen-2/", nil, "phone screen"},
+		{"screen recording across hyphens", "https://www.pexels.com/video/screen-recording-of-app-3/", nil, "screen recording"},
+		{"term in tag", "https://www.pexels.com/video/clip-4/", []string{"messaging app", "chat"}, "messaging app"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := screenRecordingTermIn(clipMetadata(tc.url, tc.tags)); got != tc.want {
+				t.Errorf("screenRecordingTermIn(%q, %v) = %q, want %q", tc.url, tc.tags, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPreferredScore(t *testing.T) {
 	// url contributes "person" + "office"; tags add "thinking" + "face".
 	meta := clipMetadata("https://www.pexels.com/video/person-in-office-1/", []string{"thinking", "face"})

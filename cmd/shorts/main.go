@@ -24,6 +24,7 @@ import (
 	"viewpro/internal/pipeline"
 	"viewpro/internal/script"
 	"viewpro/internal/subtitles"
+	"viewpro/internal/visuals"
 	"viewpro/internal/voice"
 )
 
@@ -37,6 +38,8 @@ func main() {
 		os.Exit(cmdGenerate(os.Args[2:]))
 	case "rebuild":
 		os.Exit(cmdRebuild(os.Args[2:]))
+	case "reject":
+		os.Exit(cmdReject(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -52,6 +55,7 @@ func usage() {
 Usage:
   shorts generate "<idea>" [flags]
   shorts rebuild  <session-dir>       # re-render the MP4 from existing artifacts
+  shorts reject   <video-id|session-dir> [reason]   # block clip(s) from future runs
 
 Flags:
   --seed-script PATH       reuse a prior script.json instead of calling Anthropic
@@ -67,6 +71,8 @@ Examples:
   shorts generate "the spotlight effect" --script-style question --caption-preset c
   shorts generate "the spotlight effect" --seed-script output/20260514-143022/script.json
   shorts rebuild output/20260514-010619
+  shorts reject pexels_6586070 "personal data visible in screen recording"
+  shorts reject output/20260514-010619 "flagged by content review"
 `)
 }
 
@@ -389,6 +395,87 @@ func cmdRebuild(args []string) int {
 	}
 	fmt.Printf("=== DONE ===\nOutput: %s\nWall:   %s\n", outputPath, time.Since(start).Round(time.Second))
 	return 0
+}
+
+// cmdReject adds clips to cache/rejected_clips.json so every future run
+// skips them. Accepts either a Pexels video ID ("6586070" or
+// "pexels_6586070") or a session directory — the latter rejects every
+// clip used in that Short, which is the usual move after a content-
+// safety flag on a published video.
+func cmdReject(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: shorts reject <video-id|session-dir> [reason...]")
+		return 2
+	}
+	loadDotEnv(".env")
+	cacheDir := envDefault("CACHE_DIR", "cache")
+	target := args[0]
+	reason := strings.Join(args[1:], " ")
+
+	// Session directory → reject every clip used in that Short.
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		segs, err := assembly.LoadSegments(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reject: load segments from %s: %v\n", target, err)
+			return 1
+		}
+		ids := map[int]bool{}
+		for _, s := range segs {
+			if id, ok := videoIDFromPath(s.ClipPath); ok {
+				ids[id] = true
+			}
+		}
+		if len(ids) == 0 {
+			fmt.Fprintf(os.Stderr, "reject: no Pexels clips found in %s\n", target)
+			return 1
+		}
+		added := 0
+		for id := range ids {
+			ok, err := visuals.RejectClip(cacheDir, id, reason, target)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "reject: %v\n", err)
+				return 1
+			}
+			if ok {
+				added++
+				fmt.Printf("rejected pexels_%d\n", id)
+			}
+		}
+		fmt.Printf("done: %d new clip(s) rejected from %s (%d used in session)\n", added, target, len(ids))
+		return 0
+	}
+
+	// Otherwise treat the argument as a single video ID.
+	id, err := parseVideoID(target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reject: %q is neither a video ID nor a directory\n", target)
+		return 2
+	}
+	ok, err := visuals.RejectClip(cacheDir, id, reason, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reject: %v\n", err)
+		return 1
+	}
+	if ok {
+		fmt.Printf("rejected pexels_%d\n", id)
+	} else {
+		fmt.Printf("pexels_%d was already in the rejected list\n", id)
+	}
+	return 0
+}
+
+// parseVideoID accepts "6586070", "pexels_6586070", or "pexels_6586070.mp4".
+func parseVideoID(s string) (int, error) {
+	s = strings.TrimSuffix(s, ".mp4")
+	s = strings.TrimPrefix(s, "pexels_")
+	return strconv.Atoi(s)
+}
+
+// videoIDFromPath extracts the Pexels video ID from a cached clip path
+// such as ".../cache/pexels_6586070.mp4".
+func videoIDFromPath(p string) (int, bool) {
+	id, err := parseVideoID(filepath.Base(p))
+	return id, err == nil
 }
 
 // readHookOverlay loads script.json and returns the hook overlay text.

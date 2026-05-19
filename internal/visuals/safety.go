@@ -1,6 +1,9 @@
 package visuals
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // Content-safety screening for Pexels results. Pexels matches loose
 // keywords ("person pausing at threshold" → bedroom thresholds → bare-
@@ -9,9 +12,10 @@ import "strings"
 // metadata before it can be selected, and rank survivors by how well
 // they fit the psychology niche.
 
-// blockedTerms disqualify a clip outright. Match is case-insensitive
-// substring against the clip's metadata (URL slug + tags). Tune this
-// list over time using the broll_review log in audit.json.
+// blockedTerms disqualify a clip outright. Matched case-insensitively
+// on whole-word boundaries (see containsTerm) against the clip's
+// metadata (URL slug + tags). Tune this list over time using the
+// broll_review log in audit.json.
 var blockedTerms = []string{
 	"bikini", "lingerie", "underwear", "swimsuit", "topless",
 	"nude", "intimate", "seductive", "boudoir", "sensual",
@@ -31,9 +35,12 @@ var preferredTerms = []string{
 }
 
 // clipMetadata flattens a video's searchable text — the page URL (whose
-// slug describes the clip) plus any tags — into one lowercased string.
-// Hyphens and underscores become spaces so multi-word terms ("bare
-// legs") match Pexels' hyphen-delimited URL slugs ("/bare-legs-in-bed-1/").
+// slug describes the clip) plus any tags — into one lowercased string
+// with every non-alphanumeric character reduced to a space. That makes
+// the whole string a clean run of space-separated words, so terms can
+// be matched on word boundaries (see containsTerm) — "spa" no longer
+// matches inside "workspace", and multi-word terms still match Pexels'
+// hyphen-delimited URL slugs.
 // Note: the Pexels video object exposes no free-text description field,
 // so URL slug + tags are all the metadata available.
 func clipMetadata(rawURL string, tags []string) string {
@@ -43,17 +50,44 @@ func clipMetadata(rawURL string, tags []string) string {
 		b.WriteByte(' ')
 		b.WriteString(t)
 	}
-	s := strings.ToLower(b.String())
-	s = strings.ReplaceAll(s, "-", " ")
-	s = strings.ReplaceAll(s, "_", " ")
-	return s
+	var out strings.Builder
+	for _, r := range strings.ToLower(b.String()) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out.WriteRune(r)
+		} else {
+			out.WriteByte(' ')
+		}
+	}
+	return out.String()
+}
+
+// containsTerm reports whether term occurs in meta as a whole word or
+// whole phrase — bounded by spaces or the string ends. meta must be
+// clipMetadata-normalized (lowercase, space-separated words). This is
+// what keeps "spa" from matching inside "workspace".
+func containsTerm(meta, term string) bool {
+	for i := 0; i+len(term) <= len(meta); {
+		j := strings.Index(meta[i:], term)
+		if j < 0 {
+			return false
+		}
+		j += i
+		startOK := j == 0 || meta[j-1] == ' '
+		end := j + len(term)
+		endOK := end == len(meta) || meta[end] == ' '
+		if startOK && endOK {
+			return true
+		}
+		i = j + 1
+	}
+	return false
 }
 
 // blockedTermIn returns the first blocked term found in meta, or "" if
 // the clip is clean. meta must already be clipMetadata-normalized.
 func blockedTermIn(meta string) string {
 	for _, term := range blockedTerms {
-		if strings.Contains(meta, term) {
+		if containsTerm(meta, term) {
 			return term
 		}
 	}
@@ -65,7 +99,7 @@ func blockedTermIn(meta string) string {
 func preferredScore(meta string) int {
 	n := 0
 	for _, term := range preferredTerms {
-		if strings.Contains(meta, term) {
+		if containsTerm(meta, term) {
 			n++
 		}
 	}
@@ -94,7 +128,7 @@ const softIntroPenalty = 1000
 // "". meta must be clipMetadata-normalized.
 func softIntroTermIn(meta string) string {
 	for _, term := range softIntroTerms {
-		if strings.Contains(meta, term) {
+		if containsTerm(meta, term) {
 			return term
 		}
 	}
@@ -110,7 +144,8 @@ func softIntroTermIn(meta string) string {
 var screenRecordingTerms = []string{
 	"screen recording", "phone screen", "smartphone screen",
 	"app screen", "search bar", "notification panel",
-	"messaging app", "social media app",
+	"messaging app", "social media app", "browser screen",
+	"search history", "search results", "typing message",
 }
 
 // screenRecordingPenalty is subtracted from a clip's rank score when it
@@ -122,9 +157,60 @@ const screenRecordingPenalty = 1000
 // in meta, or "". meta must be clipMetadata-normalized.
 func screenRecordingTermIn(meta string) string {
 	for _, term := range screenRecordingTerms {
-		if strings.Contains(meta, term) {
+		if containsTerm(meta, term) {
 			return term
 		}
 	}
 	return ""
+}
+
+// faceTerms mark clips whose subject is a human face or a person
+// looking toward camera. The opening frame is the single biggest
+// retention lever, so segment 0 strongly prefers these (see faceBoost);
+// every other segment ranks normally and is unaffected.
+//
+// Deliberately NOT included: "close up" — a close-up of a notebook or
+// coffee cup is not a face, and including it scored object clips as
+// faces. faceTerms must be subject-specific, not framing-specific.
+var faceTerms = []string{
+	"portrait", "face", "head shot", "headshot",
+	"person looking", "talking to camera", "looking at camera",
+	"person speaking", "facial expression", "eye contact",
+	"looking directly",
+}
+
+// faceBoost is added to a segment-0 candidate's rank score when its
+// metadata matches a faceTerm. It dwarfs the preferred-term spread
+// (0..~19) so any face clip outranks any non-face clip, yet stays well
+// below the 1000-scale safety penalties — so a soft-intro or screen-
+// recording clip is never lifted into segment 0 by it.
+const faceBoost = 100
+
+// faceTermIn returns the first face term found in meta, or "".
+// meta must be clipMetadata-normalized.
+func faceTermIn(meta string) string {
+	for _, term := range faceTerms {
+		if containsTerm(meta, term) {
+			return term
+		}
+	}
+	return ""
+}
+
+// faceScore is the human-readable segment-0 quality metric from the
+// retention spec: +10 for a face match, -5 for a soft-intro match, -10
+// for screen content. It is logged and decides the face-fallback
+// search; clip *selection* uses the 1000-scale ranking in pexels.go.
+func faceScore(meta string) int {
+	score := 0
+	if faceTermIn(meta) != "" {
+		score += 10
+	}
+	if softIntroTermIn(meta) != "" {
+		score -= 5
+	}
+	if screenRecordingTermIn(meta) != "" {
+		score -= 10
+	}
+	return score
 }

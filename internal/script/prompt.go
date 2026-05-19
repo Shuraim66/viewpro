@@ -82,6 +82,55 @@ that runs long.
 // sharedEditorialAndSchema is the tail block appended to every variant.
 // It enforces the editorial-voice fingerprint and the JSON output shape.
 const sharedEditorialAndSchema = `
+HOOK STRUCTURE:
+
+The hook must follow this pattern:
+- Second-person ("you", "your") — not third-person
+- Present-tense or immediate-tense ("right now", "the X you", "when you")
+- Creates a curiosity gap that the body resolves
+
+GOOD examples:
+- "Replaying arguments at 3 AM? Your brain is doing something nobody told you about."
+- "The one text you ignored is taking more brain than the ten you did."
+- "Walk through a doorway and instantly forget why you came in?"
+
+BAD examples:
+- "Inattentional blindness is when..." (third-person, lecture format)
+- "Did you know that people apologize because..." (didactic)
+- "The psychology of [X]" (no curiosity, no recognition)
+
+The hook_overlay_text (4-6 words, all caps) should be the most condensed
+version of the hook's curiosity gap.
+
+TWIST GUIDANCE:
+
+The twist is the most replayable, screenshot-worthy part of the Short. It
+must follow one of two patterns:
+
+PATTERN 1 — ACTIONABLE INSTRUCTION (preferred when the concept implies an
+intervention): A small, concrete thing the viewer can do next time they
+encounter this phenomenon.
+Examples:
+- "Pause before crossing the threshold. Say the goal out loud."
+- "Write it down — even 'I'll handle this Tuesday' tells your brain it's handled."
+- "Three words: 'I am anxious.' Watch your amygdala calm."
+
+PATTERN 2 — COUNTERINTUITIVE REFRAME (use when no clean action exists): A
+small inversion of the viewer's assumption that lands as a payoff.
+Examples:
+- "Right now, you're replaying something from three years ago. They moved on three seconds later."
+- "Your eyes are open. Your brain is filtering."
+- "You're not anxious because you replay it. You replay it because your brain thinks it's unresolved."
+
+NEVER use:
+- Questions for the viewer to ponder ("What are you ignoring right now?")
+- Vague encouragements ("Your brain is more interesting than you think")
+- Generic actionables ("Take a moment to reflect.")
+- Long lectures (the twist must be at most 2 sentences)
+
+Pick the pattern that fits the concept naturally. Lean toward actionable
+when both work.
+
 EDITORIAL VOICE (REQUIRED): The body MUST contain exactly ONE sentence
 written in first-person observation voice. Use one of these patterns
 (or a close variant) verbatim:
@@ -156,6 +205,12 @@ Examples:
 - "3 AM BRAIN HACK"
 - "WHY YOU CHECK YOUR PHONE"
 
+PUNCTUATION:
+- Use only hyphens (-), never em-dashes (—) or en-dashes (–)
+- Use straight quotes (' and "), never curly quotes
+- Use three dots (...) not ellipsis (…)
+These render reliably in subtitle fonts and produce predictable TTS pacing.
+
 Return ONLY valid JSON, no markdown fences, no commentary:
 
 {
@@ -182,36 +237,32 @@ func stylePromptBody(s Style) string {
 
 const defaultPromptBody = `You write 45-second psychology YouTube Shorts. Use this structure:
 
-1. HOOK (max 12 words, ~3 seconds spoken): A scroll-stopping opener. Vary patterns across scripts:
-   - Specific accusation: "People who [behavior] had [unexpected backstory]."
-   - Science reveal: "If you [common experience], your brain is doing something [adjective]."
-   - Contrarian claim: "Stop [common advice]. Here's what your brain actually hears."
-   - Body-language tell: "Watch what someone does with their [body part] when they [verb]."
+1. HOOK (max 12 words, ~3 seconds spoken): A scroll-stopping opener — follow HOOK STRUCTURE below.
 
 2. BODY: Name the psychology concept. Give one concrete real-world example. Write like you're leaning in to tell a friend, not like a textbook.
 
-3. TWIST (max 15 words): A counterintuitive takeaway, a question, or a callout that makes the viewer recognize themselves.`
+3. TWIST: follow TWIST GUIDANCE below.`
 
 const questionPromptBody = `You write 45-second psychology YouTube Shorts structured as Q→A. Use this structure:
 
-1. HOOK: An open question that hooks the viewer's specific lived experience. Format: "Why do you [common behavior]?" or "Why does [X] make you [feeling]?" Must be answerable. Max 14 words.
+1. HOOK: An open question to the viewer about their specific lived experience — follow HOOK STRUCTURE below. Format: "Why do you [common behavior]?" or "Why does [X] make you [feeling]?" Must be answerable. Max 14 words.
 
 2. BODY: Answer the question. Name the psychology concept. Give a concrete example. The structure should feel like "here's why" — direct, specific, not preachy. Write conversationally, like explaining to a curious friend.
 
-3. TWIST (max 15 words): Turn the answer back on the viewer with a reflective callout — "next time it happens, notice X" or a one-line reframe.`
+3. TWIST: follow TWIST GUIDANCE below.`
 
 const listPromptBody = `You write 45-second psychology YouTube Shorts as enumerated lists. Use this structure:
 
-1. HOOK (max 13 words): Announce the count + the topic. Format: "Three things [people with X behavior] all share" or "Four signs your brain is [doing Y]." The number must match what you deliver in the body. Use 2-4 items only (more loses the viewer).
+1. HOOK (max 13 words): Announce the count + the topic, addressed to the viewer — follow HOOK STRUCTURE below. Format: "Four signs your brain is [doing Y]" or "The two things you do when [X]." The number must match what you deliver in the body. Use 2-4 items only (more loses the viewer).
 
 2. BODY: Walk through each numbered item. Each item gets one sentence — a name + one specific real-world tell. Don't repeat the count number ("First...", "Second...") — let the count be implicit in the prose. End with the psychology concept that unifies the items.
 
-3. TWIST (max 15 words): Land on which item is the one most people miss, or a reflective one-liner.`
+3. TWIST: follow TWIST GUIDANCE below.`
 
 const storyPromptBody = `You write 45-second psychology YouTube Shorts as mini case studies. Use this structure:
 
-1. HOOK (max 14 words): Introduce a generic, hypothetical person doing one specific behavior. Format: "Some people keep [behavior]." or "Picture someone who [does X every time Y]." Use third-person, present-tense, no names, no claims of personal acquaintance ("I knew...", "my friend..."). Must imply something is going on neurologically.
+1. HOOK (max 14 words): A second-person hook (follow HOOK STRUCTURE below) that names one specific behavior the viewer recognizes and implies something neurological is going on. E.g. "You replay the same conversation every night — your brain has a reason."
 
-2. BODY: Explain what the brain is actually doing in that scenario. Name the psychology concept. Connect the described behavior to the general mechanism. Don't moralize; just describe. Stay generic — no fabricated patients, friends, or named individuals.
+2. BODY: Explain what the brain is actually doing in that scenario, as a mini case study. Name the psychology concept. Connect the described behavior to the general mechanism. Don't moralize; just describe. Stay generic — no fabricated patients, friends, or named individuals.
 
-3. TWIST (max 15 words): Reflective close — what this pattern reveals about the viewer's own behavior.`
+3. TWIST: follow TWIST GUIDANCE below.`

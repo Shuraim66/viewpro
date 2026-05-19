@@ -134,26 +134,77 @@ func (c *Client) FetchForKeywords(ctx context.Context, keywords []string) ([]Cli
 	return out, nil
 }
 
-// fetchOpenerWithFallback tries (in order):
-//  1. script's first keyword, with strict opener filter (close-up tags
-//     in URL slug + height > 1.6×width + duration ≥3s)
-//  2. curated opener pool (same strict filter)
-//  3. drop strict filter and call the regular fallback chain
+// fetchOpenerWithFallback picks the segment-0 clip, preferring a face /
+// person-looking-at-camera shot since the opening frame is the biggest
+// retention lever. It tries, in order, until one yields a clip with a
+// positive faceScore:
+//  1. the script's first keyword (strict opener filter, face-boosted rank)
+//  2. a face-targeted parallel search (keyword + "close up portrait face")
+//  3. the curated opener pool (same strict filter)
+//  4. the non-strict default fallback chain
+//
+// If no level produces a positive-faceScore clip, the first clip seen
+// is used and logged for manual review before publishing.
 func (c *Client) fetchOpenerWithFallback(ctx context.Context, keyword string) *ClipSummary {
-	if clips := c.tryQueryFiltered(ctx, keyword, openerVariant, openerFilter, 1); len(clips) > 0 {
-		fmt.Fprintf(os.Stderr, "[visuals] opener L1 hit: %q\n", keyword)
-		return &clips[0]
+	var firstSeen *ClipSummary // best effort if nothing scores a face match
+
+	// accept logs and returns true when clip is a positive-faceScore
+	// pick; otherwise it records clip as a fallback candidate.
+	accept := func(clip *ClipSummary) bool {
+		if firstSeen == nil {
+			firstSeen = clip
+		}
+		score := faceScore(clipMetadata(clip.URL, clip.Tags))
+		if score > 0 {
+			fmt.Fprintf(os.Stderr, "[visuals] seg 0: selected %q (score: %d)\n", slugTitle(clip.URL), score)
+			return true
+		}
+		return false
 	}
-	fmt.Fprintf(os.Stderr, "[visuals] opener L1 miss for %q\n", keyword)
-	for _, q := range openerPool {
-		if clips := c.tryQueryFiltered(ctx, q, openerVariant, openerFilter, 1); len(clips) > 0 {
-			fmt.Fprintf(os.Stderr, "[visuals] opener L2 hit: %q → %q (pool)\n", keyword, q)
+
+	// Level 1: original keyword, strict opener filter.
+	if clips := c.tryQueryFiltered(ctx, keyword, openerVariant, openerFilter, 1); len(clips) > 0 {
+		if accept(&clips[0]) {
 			return &clips[0]
 		}
 	}
-	fmt.Fprintf(os.Stderr, "[visuals] opener strict failed for %q, using default fallback\n", keyword)
+
+	// Level 2: face-targeted parallel search.
+	faceQuery := keyword + " close up portrait face"
+	if clips := c.tryQueryFiltered(ctx, faceQuery, openerVariant, openerFilter, 1); len(clips) > 0 {
+		if accept(&clips[0]) {
+			return &clips[0]
+		}
+	}
+
+	// Level 3: curated opener pool.
+	for _, q := range openerPool {
+		if clips := c.tryQueryFiltered(ctx, q, openerVariant, openerFilter, 1); len(clips) > 0 {
+			if accept(&clips[0]) {
+				return &clips[0]
+			}
+		}
+	}
+
+	// Level 4: non-strict default fallback.
 	if clips := c.fetchClipsForKeyword(ctx, keyword, 1); len(clips) > 0 {
-		return &clips[0]
+		if accept(&clips[0]) {
+			return &clips[0]
+		}
+	}
+
+	// No positive-faceScore clip anywhere — use the first one seen and
+	// flag it so it can be reviewed before publishing.
+	if firstSeen != nil {
+		score := faceScore(clipMetadata(firstSeen.URL, firstSeen.Tags))
+		if score < 0 {
+			fmt.Fprintf(os.Stderr, "[visuals] WARN seg 0: no face-match, fallback clip %q has negative score (%d) — review before publishing\n",
+				slugTitle(firstSeen.URL), score)
+		} else {
+			fmt.Fprintf(os.Stderr, "[visuals] seg 0: no face-match found, using fallback clip %q (score: %d)\n",
+				slugTitle(firstSeen.URL), score)
+		}
+		return firstSeen
 	}
 	return nil
 }
@@ -416,6 +467,12 @@ func (c *Client) tryQueryFiltered(ctx context.Context, query, variant string, fi
 		score := preferredScore(meta)
 		soft := false
 		if isOpener {
+			// Face-first: the opening frame is the biggest retention
+			// lever, so a face / person-looking-at-camera clip is
+			// boosted far above any non-face candidate.
+			if faceTermIn(meta) != "" {
+				score += faceBoost
+			}
 			if term := softIntroTermIn(meta); term != "" {
 				soft = true
 				softIntroSeen = true

@@ -98,11 +98,44 @@ func (g *Generator) Generate(ctx context.Context, idea string, opts GenerateOpts
 	if err != nil {
 		return nil, err
 	}
+	// Backstop the prompt's PUNCTUATION rule: normalize any Unicode
+	// punctuation the model still emitted in the spoken fields before
+	// they reach TTS, captions, and script.json.
+	s.Hook = sanitizePunctuation(s.Hook)
+	s.Body = sanitizePunctuation(s.Body)
+	s.Twist = sanitizePunctuation(s.Twist)
 	return &Result{
 		Script:       s,
 		InputTokens:  msg.Usage.InputTokens,
 		OutputTokens: msg.Usage.OutputTokens,
 	}, nil
+}
+
+// punctuationSanitizer maps the Unicode punctuation LLMs tend to emit to
+// plain ASCII. strings.NewReplacer is used rather than a map literal so
+// there is no duplicate-key hazard between the two single-quote (and two
+// double-quote) variants, and it applies every pair in a single pass.
+var punctuationSanitizer = strings.NewReplacer(
+	"—", " - ", // em-dash
+	"–", " - ", // en-dash
+	"‘", "'", // left single quote
+	"’", "'", // right single quote / apostrophe
+	"“", `"`, // left double quote
+	"”", `"`, // right double quote
+	"…", "...", // ellipsis
+)
+
+var whitespaceRE = regexp.MustCompile(`\s+`)
+
+// sanitizePunctuation rewrites curly quotes, em/en dashes, and ellipsis
+// characters to ASCII, then collapses whitespace runs. Curly punctuation
+// renders unreliably in subtitle fonts and skews TTS pacing; the system
+// prompt asks the model to avoid it and this catches anything that slips
+// through. Applied to the spoken fields before script.json is written.
+func sanitizePunctuation(s string) string {
+	s = punctuationSanitizer.Replace(s)
+	s = whitespaceRE.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
 }
 
 // editorialVoicePatterns matches the first-person observation sentences
